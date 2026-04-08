@@ -1,0 +1,12 @@
+{
+  "name": "pbireact-monorepo",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "npm --prefix web run dev",
+    "build": "npm --prefix web run build",
+    "preview": "npm --prefix web run preview",
+    "dev:web": "npm --prefix web run dev",
+    "dev:api": "python api/app.py"
+  }
+}
