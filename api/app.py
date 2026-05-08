@@ -104,6 +104,16 @@ def _send_debug_request(method: str, url: str, **kwargs) -> requests.Response:
     request_data = {key: value for key, value in request_data.items() if value is not None}
 
     prepared_request = session.prepare_request(requests.Request(**request_data))
+    explicit_authorization = (request_data.get('headers') or {}).get('Authorization')
+    prepared_authorization = prepared_request.headers.get('Authorization')
+    preparation_warnings = []
+    if explicit_authorization and prepared_authorization != explicit_authorization:
+        preparation_warnings.append(
+            'requests changed the explicit Authorization header during preparation; '
+            'restored the caller-provided value'
+        )
+        prepared_request.headers['Authorization'] = explicit_authorization
+
     env_settings = session.merge_environment_settings(prepared_request.url, {}, None, None, None)
     send_kwargs = {**env_settings, **kwargs, 'timeout': timeout}
 
@@ -113,6 +123,7 @@ def _send_debug_request(method: str, url: str, **kwargs) -> requests.Response:
             'preparedBody': prepared_request.body,
             'preparedHeaders': dict(prepared_request.headers),
             'preparedUrl': prepared_request.url,
+            'preparationWarnings': preparation_warnings,
             'requestsSettings': {
                 'cert': send_kwargs.get('cert'),
                 'proxies': _safe_proxies(send_kwargs.get('proxies')),
