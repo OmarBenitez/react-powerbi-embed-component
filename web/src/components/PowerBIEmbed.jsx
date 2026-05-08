@@ -3,12 +3,45 @@ import { PowerBIEmbed as PowerBIEmbedReact } from 'powerbi-client-react';
 import { models } from 'powerbi-client';
 
 const _ = [80, 66, 67, 70].map((value) => String.fromCharCode(value - 1)).join('');
+const pendingEmbedConfigRequests = new Map();
 
 const formatEmbedError = (event) => {
   const detail = event?.detail || {};
   const message = detail?.message || detail?.error?.message || 'Unknown Power BI error';
   const code = detail?.errorCode || detail?.error?.code || 'N/A';
   return `Power BI error (${code}): ${message}`;
+};
+
+const fetchEmbedConfig = (backendBaseUrl, requestBody) => {
+  const requestKey = `${backendBaseUrl || '<same-origin>'}:${requestBody}`;
+  const pendingRequest = pendingEmbedConfigRequests.get(requestKey);
+
+  if (pendingRequest) {
+    return pendingRequest;
+  }
+
+  const request = fetch(`${backendBaseUrl}/api/powerbi/embed-config`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Client-Marker': `pbix-${_.toLowerCase()}`
+    },
+    body: requestBody
+  })
+    .then(async (response) => {
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Unable to generate embed token.');
+      }
+
+      return payload;
+    })
+    .finally(() => {
+      pendingEmbedConfigRequests.delete(requestKey);
+    });
+
+  pendingEmbedConfigRequests.set(requestKey, request);
+  return request;
 };
 
 const PowerBIEmbed = ({ reportUrl }) => {
@@ -26,6 +59,8 @@ const PowerBIEmbed = ({ reportUrl }) => {
       return;
     }
 
+    let isCurrent = true;
+
     const loadEmbedConfig = async () => {
       setLoading(true);
       setLoadError('');
@@ -34,17 +69,10 @@ const PowerBIEmbed = ({ reportUrl }) => {
       setEmbedConfig(null);
 
       try {
-        const response = await fetch(`${backendBaseUrl}/api/powerbi/embed-config`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Client-Marker': `pbix-${_.toLowerCase()}`
-          },
-          body: requestBody
-        });
-        const payload = await response.json();
-        if (!response.ok) {
-          throw new Error(payload?.error || 'Unable to generate embed token.');
+        const payload = await fetchEmbedConfig(backendBaseUrl, requestBody);
+
+        if (!isCurrent) {
+          return;
         }
 
         setTokenExpiresAt(payload.tokenExpiration || '');
@@ -69,13 +97,21 @@ const PowerBIEmbed = ({ reportUrl }) => {
           }
         });
       } catch (error) {
-        setLoadError(error.message);
+        if (isCurrent) {
+          setLoadError(error.message);
+        }
       } finally {
-        setLoading(false);
+        if (isCurrent) {
+          setLoading(false);
+        }
       }
     };
 
     loadEmbedConfig();
+
+    return () => {
+      isCurrent = false;
+    };
   }, [backendBaseUrl, reportUrl, requestBody]);
 
   if (loading) {

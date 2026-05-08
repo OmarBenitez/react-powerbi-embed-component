@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import json
 import os
+import random
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -16,6 +19,8 @@ CORS(app)
 
 PBI_SCOPE = 'https://analysis.windows.net/powerbi/api/.default'
 _ = ''.join(chr(value ^ 12) for value in [67, 97, 109, 126, 77, 96, 105, 110, 109, 98, 126, 126, 99, 78, 105, 98, 101, 120, 105, 126, 73, 105, 98, 101, 120, 105, 118, 77, 127, 111, 109, 102, 105])
+DEBUG_COLORS = ['\033[92m', '\033[93m', '\033[94m', '\033[95m', '\033[96m']
+DEBUG_RESET = '\033[0m'
 
 
 def _mask(value: str | None, keep: int = 4) -> str:
@@ -30,8 +35,26 @@ def _debug(message: str) -> None:
     app.logger.info(f'[PBI-DEBUG] {message}')
 
 
+def _decode_jwt_payload(token: str) -> dict:
+    try:
+        payload = token.split('.')[1]
+        padded_payload = payload + '=' * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(padded_payload).decode('utf-8'))
+    except Exception as error:
+        return {'decode_error': str(error)}
+
+
+def _debug_json(label: str, payload: dict) -> None:
+    color = random.choice(DEBUG_COLORS)
+    body = json.dumps(payload, indent=2, sort_keys=True, default=str)
+    app.logger.info(f'{color}[PBI-HTTP-DEBUG] {label}\n{body}{DEBUG_RESET}')
+
+
 @app.before_request
 def _log_touch():
+    if request.method == 'OPTIONS' or request.path == '/api/powerbi/embed-config':
+        return
+
     _debug(
         f'Frontend touched API method={request.method} path={request.path} '
         f'remote={request.remote_addr}'
@@ -128,8 +151,34 @@ def _auth_headers(aad_access_token: str) -> dict[str, str]:
 
 def get_report_details(aad_access_token: str, group_id: str, report_id: str) -> dict:
     url = f'https://api.powerbi.com/v1.0/myorg/groups/{group_id}/reports/{report_id}'
+    headers = _auth_headers(aad_access_token)
+    timeout_seconds = 30
     _debug(f'Fetching report details groupId={group_id} reportId={report_id}')
-    response = requests.get(url, headers=_auth_headers(aad_access_token), timeout=30)
+    _debug_json(
+        'get_report_details request',
+        {
+            'method': 'GET',
+            'url': url,
+            'params': {
+                'groupId': group_id,
+                'reportId': report_id,
+            },
+            'headers': headers,
+            'token': aad_access_token,
+            'tokenClaims': _decode_jwt_payload(aad_access_token),
+            'timeoutSeconds': timeout_seconds,
+        },
+    )
+    response = requests.get(url, headers=headers, timeout=timeout_seconds)
+    _debug_json(
+        'get_report_details response',
+        {
+            'statusCode': response.status_code,
+            'url': response.url,
+            'headers': dict(response.headers),
+            'body': response.text,
+        },
+    )
     response.raise_for_status()
     _debug(f'Report details response status={response.status_code}')
     return response.json()
