@@ -308,7 +308,13 @@ def generate_embed_token_v2(
         f'lifetimeInMinutes={lifetime_minutes or "<default>"}'
     )
 
-    response = requests.post(url, json=body, headers=_auth_headers(aad_access_token), timeout=30)
+    response = _send_debug_request(
+        'POST',
+        url,
+        json=body,
+        headers=_auth_headers(aad_access_token),
+        timeout=30,
+    )
     response.raise_for_status()
     _debug(f'Embed token response status={response.status_code}')
     return response.json()
