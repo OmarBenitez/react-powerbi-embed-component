@@ -35,8 +35,30 @@ def _debug(message: str) -> None:
     app.logger.info(f'[PBI-DEBUG] {message}')
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _as_bearer_token(token: str) -> str:
+    token = token.strip()
+    if token.lower().startswith('bearer '):
+        return token
+    return f'Bearer {token}'
+
+
+def _jwt_only(token: str) -> str:
+    token = token.strip()
+    if token.lower().startswith('bearer '):
+        return token.split(None, 1)[1]
+    return token
+
+
 def _decode_jwt_payload(token: str) -> dict:
     try:
+        token = _jwt_only(token)
         payload = token.split('.')[1]
         padded_payload = payload + '=' * (-len(payload) % 4)
         return json.loads(base64.urlsafe_b64decode(padded_payload).decode('utf-8'))
@@ -48,6 +70,77 @@ def _debug_json(label: str, payload: dict) -> None:
     color = random.choice(DEBUG_COLORS)
     body = json.dumps(payload, indent=2, sort_keys=True, default=str)
     app.logger.info(f'{color}[PBI-HTTP-DEBUG] {label}\n{body}{DEBUG_RESET}')
+
+
+def _safe_proxy_url(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+
+    parsed = urlparse(value)
+    if not parsed.username and not parsed.password:
+        return value
+
+    hostname = parsed.hostname or ''
+    port = f':{parsed.port}' if parsed.port else ''
+    return parsed._replace(netloc=f'<credentials>@{hostname}{port}').geturl()
+
+
+def _safe_proxies(proxies: dict | None) -> dict:
+    return {key: _safe_proxy_url(value) for key, value in (proxies or {}).items()}
+
+
+def _send_debug_request(method: str, url: str, **kwargs) -> requests.Response:
+    session = requests.Session()
+    session.trust_env = _env_bool('PBI_REQUESTS_TRUST_ENV', True)
+    request_data = {
+        'method': method,
+        'url': url,
+        'headers': kwargs.pop('headers', None),
+        'params': kwargs.pop('params', None),
+        'json': kwargs.pop('json', None),
+        'data': kwargs.pop('data', None),
+    }
+    timeout = kwargs.pop('timeout', 30)
+    request_data = {key: value for key, value in request_data.items() if value is not None}
+
+    prepared_request = session.prepare_request(requests.Request(**request_data))
+    env_settings = session.merge_environment_settings(prepared_request.url, {}, None, None, None)
+    send_kwargs = {**env_settings, **kwargs, 'timeout': timeout}
+
+    _debug_json(
+        f'{method} request',
+        {
+            'preparedBody': prepared_request.body,
+            'preparedHeaders': dict(prepared_request.headers),
+            'preparedUrl': prepared_request.url,
+            'requestsSettings': {
+                'cert': send_kwargs.get('cert'),
+                'proxies': _safe_proxies(send_kwargs.get('proxies')),
+                'stream': send_kwargs.get('stream'),
+                'trustEnv': session.trust_env,
+                'verify': send_kwargs.get('verify'),
+            },
+            'timeoutSeconds': timeout,
+        },
+    )
+
+    response = session.send(prepared_request, **send_kwargs)
+    _debug_json(
+        f'{method} response',
+        {
+            'elapsedSeconds': response.elapsed.total_seconds(),
+            'history': [
+                {'statusCode': item.status_code, 'url': item.url}
+                for item in response.history
+            ],
+            'requestHeaders': dict(response.request.headers),
+            'requestUrl': response.request.url,
+            'responseBody': response.text,
+            'responseHeaders': dict(response.headers),
+            'statusCode': response.status_code,
+        },
+    )
+    return response
 
 
 @app.before_request
@@ -142,16 +235,20 @@ def get_aad_access_token() -> str:
     return response.json()['access_token']
 
 
-def _auth_headers(aad_access_token: str) -> dict[str, str]:
-    return {
-        'Authorization': f'Bearer {aad_access_token}',
-        'Content-Type': 'application/json',
+def _auth_headers(aad_access_token: str, include_content_type: bool = True) -> dict[str, str]:
+    headers = {
+        'Accept': 'application/json',
+        'Authorization': _as_bearer_token(aad_access_token),
+        'User-Agent': os.getenv('PBI_HTTP_USER_AGENT', 'pbireact-powerbi-embed/1.0'),
     }
+    if include_content_type:
+        headers['Content-Type'] = 'application/json'
+    return headers
 
 
 def get_report_details(aad_access_token: str, group_id: str, report_id: str) -> dict:
     url = f'https://api.powerbi.com/v1.0/myorg/groups/{group_id}/reports/{report_id}'
-    headers = _auth_headers(aad_access_token)
+    headers = _auth_headers(aad_access_token, include_content_type=False)
     timeout_seconds = 30
     _debug(f'Fetching report details groupId={group_id} reportId={report_id}')
     _debug_json(
@@ -169,15 +266,11 @@ def get_report_details(aad_access_token: str, group_id: str, report_id: str) -> 
             'timeoutSeconds': timeout_seconds,
         },
     )
-    response = requests.get(url, headers=headers, timeout=timeout_seconds)
-    _debug_json(
-        'get_report_details response',
-        {
-            'statusCode': response.status_code,
-            'url': response.url,
-            'headers': dict(response.headers),
-            'body': response.text,
-        },
+    response = _send_debug_request(
+        'GET',
+        url,
+        headers=headers,
+        timeout=timeout_seconds,
     )
     response.raise_for_status()
     _debug(f'Report details response status={response.status_code}')
